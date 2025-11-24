@@ -13,6 +13,8 @@ MAX_LATERAL_ERROR_FOR_FULL_SPEED = 1.0  # Reduce speed aggressively if lateral e
 LOOKAHEAD_BASE = 10.0  # Base lookahead distance (longer for stability)
 LOOKAHEAD_KV = 0.15  # Speed-dependent lookahead coefficient
 STEERING_SMOOTHING = 0.6  # Smoothing factor for steering (higher = smoother, less wobbling)
+DT = 0.1  # Simulation time step (from racecar.py)
+K_FF = 0.5  # Feedforward gain (reduced to prevent oscillations)
 
 def wrap_angle(angle: float) -> float:
     """
@@ -253,37 +255,22 @@ def controller(
     
     # Get raceline if available, otherwise use centerline
     # Use raceline for tracking if it's available (instructor recommendation)
-    # NOTE: Raceline may be closer to track boundaries, so we blend with centerline for safety
+    # NOTE: Use raceline directly but with more conservative control to stay away from boundaries
     using_raceline = False
     if hasattr(racetrack, 'raceline') and racetrack.raceline is not None:
-        # Blend raceline with centerline to stay away from boundaries
-        # Use 70% raceline + 30% centerline to create a safer path
-        raceline = racetrack.raceline
-        centerline_ref = racetrack.centerline
-        
-        # Interpolate between raceline and centerline
-        # Find corresponding points (assume similar indexing)
-        blended_centerline = np.zeros_like(raceline)
-        for i in range(len(raceline)):
-            # Find closest centerline point to this raceline point
-            dists = np.linalg.norm(centerline_ref - raceline[i], axis=1)
-            closest_center_idx = np.argmin(dists)
-            # Blend: 70% raceline, 30% centerline (moves away from boundaries)
-            blended_centerline[i] = 0.7 * raceline[i] + 0.3 * centerline_ref[closest_center_idx]
-        
-        centerline = blended_centerline
+        centerline = racetrack.raceline
         using_raceline = True
     else:
         centerline = racetrack.centerline
     
-    # When using raceline, be more aggressive about staying on it (raceline is closer to boundaries)
-    # Reduce thresholds for lateral correction to prevent drift
+    # When using raceline, be more conservative to avoid boundaries
+    # Use slightly tighter thresholds but not too aggressive to prevent oscillations
     if using_raceline:
-        # More aggressive correction thresholds when using raceline
-        LAT_ERROR_THRESHOLD_SMALL = 0.5  # Reduced from 1.0
-        LAT_ERROR_THRESHOLD_MEDIUM = 1.0  # Reduced from 2.0
-        LAT_ERROR_THRESHOLD_LARGE = 2.0  # Reduced from 3.0
-        LAT_ERROR_THRESHOLD_RECOVERY = 1.5  # Reduced from 3.0
+        # Conservative thresholds when using raceline (to avoid boundaries)
+        LAT_ERROR_THRESHOLD_SMALL = 0.8  # Slightly tighter than centerline
+        LAT_ERROR_THRESHOLD_MEDIUM = 1.5  # Moderate threshold
+        LAT_ERROR_THRESHOLD_LARGE = 2.5  # Large error threshold
+        LAT_ERROR_THRESHOLD_RECOVERY = 2.0  # Recovery threshold
     else:
         # Normal thresholds for centerline
         LAT_ERROR_THRESHOLD_SMALL = 1.0
@@ -416,58 +403,76 @@ def controller(
     dist_to_lookahead = np.linalg.norm(to_lookahead)
     
     if dist_to_lookahead < 1e-3:
-        # Fallback: use track heading error
-        delta_des = 0.5 * K_HEAD * heading_error_track
+        # Fallback: use track heading error with feedforward
+        theta_d = heading_error_track + heading  # Desired heading
+        heading_error_ff = wrap_angle(theta_d - heading)
+        # Feedforward steering: δ_ff = (L / (v * Δt)) * (θ_d - φ)
+        v_ff = max(v, 0.5)  # Avoid division by zero
+        delta_ff = (wheelbase / (v_ff * DT)) * heading_error_ff
+        delta_ff = K_FF * delta_ff  # Scale feedforward
+        # Feedback term
+        delta_fb = 0.5 * K_HEAD * heading_error_track
+        delta_des = delta_ff + delta_fb
     else:
-        # CRITICAL RECOVERY MODE: When off track, use Pure Pursuit with very long lookahead
-        # Pure Pursuit naturally follows track shape, preventing perpendicular steering
-        # The long lookahead ensures we consider track shape ahead, not just one point
+        # Compute desired heading from lookahead point
+        angle_to_lookahead = np.arctan2(to_lookahead[1], to_lookahead[0])
+        theta_d = angle_to_lookahead  # Desired heading
+        heading_error_ff = wrap_angle(theta_d - heading)
+        
+        # FEEDFORWARD STEERING: δ_ff = (L / (v * Δt)) * (θ_d - φ)
+        # This provides model-based steering to rotate toward desired heading
+        # Reduces oscillations, especially on straights
+        v_ff = max(v, 0.5)  # Avoid division by zero, use current speed
+        delta_ff = (wheelbase / (v_ff * DT)) * heading_error_ff
+        
+        # Adjust feedforward gain based on track conditions
+        # Reduce feedforward on straights to prevent oscillations
+        if is_sharp_turn:
+            # Sharp turns: moderate feedforward
+            ff_gain = K_FF * 0.7  # Slightly reduced
+        elif abs(track_curvature) < 0.01:
+            # Very straight: reduce feedforward significantly to prevent oscillations
+            ff_gain = K_FF * 0.2  # Further reduced from 0.3
+        else:
+            # Moderate curvature: reduced feedforward
+            ff_gain = K_FF * 0.4  # Reduced from 0.6
+        
+        delta_ff = ff_gain * delta_ff
+        
+        # FEEDBACK STEERING: Pure Pursuit (geometric feedback)
+        sin_alpha = np.sin(heading_error_ff)
+        curvature = 2.0 * sin_alpha / dist_to_lookahead
+        
+        # Adjust feedback steering gain based on conditions
         if abs_lateral_error > LAT_ERROR_THRESHOLD_RECOVERY:
-            # Recovery mode: use Pure Pursuit with aggressive steering
-            # Pure Pursuit naturally follows the track's direction, preventing overshoot
-            angle_to_lookahead = np.arctan2(to_lookahead[1], to_lookahead[0])
-            heading_error_lookahead = wrap_angle(angle_to_lookahead - heading)
-            sin_alpha = np.sin(heading_error_lookahead)
-            curvature = 2.0 * sin_alpha / dist_to_lookahead
-            
-            # Use aggressive steering gain for recovery
+            # Recovery mode: more aggressive feedback
             if abs_lateral_error > 8.0:
-                steering_gain = 1.0  # Full gain
+                steering_gain = 1.0
             elif abs_lateral_error > 5.0:
                 steering_gain = 0.95
             else:
                 steering_gain = 0.9
-            
-            delta_des = steering_gain * np.arctan(wheelbase * curvature)
         else:
-            # Normal Pure Pursuit: compute steering based on curvature to lookahead point
-            angle_to_lookahead = np.arctan2(to_lookahead[1], to_lookahead[0])
-            heading_error = wrap_angle(angle_to_lookahead - heading)
-            sin_alpha = np.sin(heading_error)
-            curvature = 2.0 * sin_alpha / dist_to_lookahead
-            
-            # Adjust steering gain based on turn sharpness and recovery state
+            # Normal operation: adjust feedback gain
             if abs_lateral_error > 6.0:
-                # Very far off track (near violation): use maximum steering gain
-                steering_gain = 1.0  # Full gain for recovery
+                steering_gain = 1.0
             elif abs_lateral_error > 5.0:
-                # Far off track: use high steering gain
                 steering_gain = 0.95
             elif is_sharp_turn:
-                # Sharp turn: increase steering gain to turn faster
                 curvature_factor = min(1.0, track_curvature / 0.2)
-                
                 if abs_lateral_error > LAT_ERROR_THRESHOLD_MEDIUM:
-                    # Off track + sharp turn: very aggressive steering
-                    steering_gain = 0.85 + 0.15 * curvature_factor  # Range: 0.85 to 1.0
+                    steering_gain = 0.85 + 0.15 * curvature_factor
                 else:
-                    # On track + sharp turn: normal aggressive steering
-                    steering_gain = 0.6 + 0.35 * curvature_factor  # Range: 0.6 to 0.95
+                    steering_gain = 0.6 + 0.35 * curvature_factor
             else:
-                # Normal turn: conservative gain
-                steering_gain = 0.5
-            
-            delta_des = steering_gain * np.arctan(wheelbase * curvature)
+                # On straights: moderate feedback to prevent oscillations but still track
+                steering_gain = 0.5  # Increased from 0.4 for better tracking
+        
+        delta_fb = steering_gain * np.arctan(wheelbase * curvature)
+        
+        # COMBINE: δ_des = δ_ff + δ_fb
+        # Feedforward handles heading rotation, feedback handles lateral displacement
+        delta_des = delta_ff + delta_fb
         
         # Add lateral correction - CRITICAL: More aggressive when using raceline
         # Pure Pursuit with long lookahead handles recovery by following track shape
@@ -492,22 +497,20 @@ def controller(
                 delta_des = delta_des + lateral_correction
         elif abs_lateral_error > LAT_ERROR_THRESHOLD_MEDIUM:
             # Normal operation: moderate correction when off track
-            # When using raceline, be more aggressive to prevent drift
-            correction_factor = 0.3 if using_raceline else 0.25
+            # When using raceline, use similar correction but be careful not to overshoot
+            correction_factor = 0.25  # Same for both, balanced
             lateral_correction = -correction_factor * K_LAT * lateral_error
-            lateral_correction = np.clip(lateral_correction, -0.35 if using_raceline else -0.3, 0.35 if using_raceline else 0.3)
+            lateral_correction = np.clip(lateral_correction, -0.3, 0.3)
             delta_des = delta_des + lateral_correction
         elif abs_lateral_error > LAT_ERROR_THRESHOLD_SMALL:
             # Small error: use moderate correction to prevent drift
-            # When using raceline, be more aggressive
-            correction_factor = 0.25 if using_raceline else 0.2
+            correction_factor = 0.2  # Balanced correction
             lateral_correction = -correction_factor * K_LAT * lateral_error
-            lateral_correction = np.clip(lateral_correction, -0.3 if using_raceline else -0.25, 0.3 if using_raceline else 0.25)
+            lateral_correction = np.clip(lateral_correction, -0.25, 0.25)
             delta_des = delta_des + lateral_correction
         else:
             # Very close to track: small fine-tuning
-            # When using raceline, be slightly more aggressive
-            correction_factor = 0.12 if using_raceline else 0.1
+            correction_factor = 0.1  # Small correction for fine-tuning
             delta_des = delta_des - correction_factor * K_LAT * lateral_error
     
     # Apply steering smoothing to prevent wobbling
@@ -529,25 +532,25 @@ def controller(
     if abs_lateral_error > 8.0:
         # Very far off track: allow maximum steering (up to 0.9)
         if abs_current_delta > 0.9:
-            saturation_factor = 1.0 - (abs_current_delta - 0.9) / 0.05
-            saturation_factor = max(0.7, saturation_factor)
+            saturation_factor = 1.0 - (abs_current_delta - 0.9) / 0.1  # Less aggressive
+            saturation_factor = max(0.5, saturation_factor)  # Reduced from 0.7
             delta_des = delta_des * saturation_factor
     elif abs_lateral_error > 5.0:
-        # Far off track: allow high steering (up to 0.85)
-        if abs_current_delta > 0.85:
-            saturation_factor = 1.0 - (abs_current_delta - 0.85) / 0.1
-            saturation_factor = max(0.6, saturation_factor)
+        # Far off track: allow moderate steering (up to 0.75)
+        if abs_current_delta > 0.75:  # Reduced from 0.85
+            saturation_factor = 1.0 - (abs_current_delta - 0.75) / 0.2  # Less aggressive
+            saturation_factor = max(0.5, saturation_factor)  # Reduced from 0.6
             delta_des = delta_des * saturation_factor
     elif abs_lateral_error > LAT_ERROR_THRESHOLD_MEDIUM and is_sharp_turn:
-        # Off track + sharp turn: allow high steering (up to 0.85)
-        if abs_current_delta > 0.85:
-            saturation_factor = 1.0 - (abs_current_delta - 0.85) / 0.05
-            saturation_factor = max(0.6, saturation_factor)
+        # Off track + sharp turn: allow moderate steering (up to 0.7)
+        if abs_current_delta > 0.7:  # Reduced from 0.85
+            saturation_factor = 1.0 - (abs_current_delta - 0.7) / 0.15
+            saturation_factor = max(0.5, saturation_factor)
             delta_des = delta_des * saturation_factor
-    elif abs_current_delta > 0.6:  # Normal threshold
+    elif abs_current_delta > 0.5:  # Reduced from 0.6
         # Reduce new steering command to prevent over-steering
-        saturation_factor = 1.0 - (abs_current_delta - 0.6) / 0.3
-        saturation_factor = max(0.4, saturation_factor)
+        saturation_factor = 1.0 - (abs_current_delta - 0.5) / 0.4  # Less aggressive
+        saturation_factor = max(0.5, saturation_factor)  # Increased from 0.4
         delta_des = delta_des * saturation_factor
     
     # Clip δ_des to steering angle limits
@@ -557,38 +560,36 @@ def controller(
     # Set desired velocity (reduce speed for sharp turns and when off track)
     abs_lateral_error = abs(lateral_error)
     
-    # CRITICAL: Reduce speed proactively to prevent drift and violations
-    # Reduce speed when lateral error is increasing (even if small)
-    # Note: _prev_lateral_error is already declared as global earlier in the function
-    error_rate = abs_lateral_error - abs(_prev_lateral_error) if '_prev_lateral_error' in globals() else 0.0
+    # CRITICAL: Less aggressive speed reduction to allow better tracking
+    # Only reduce speed significantly when actually off track or in sharp turns
     
     if is_sharp_turn:
-        # Sharp turn detected: reduce speed proactively
-        # More curvature = more speed reduction
+        # Sharp turn detected: moderate speed reduction
         curvature_factor = min(1.0, track_curvature / 0.25)
-        turn_speed_reduction = 0.6 * curvature_factor  # Up to 60% reduction
+        turn_speed_reduction = 0.3 * curvature_factor  # Reduced from 0.6 to 0.3 (max 30% reduction)
         
-        # If also off track, reduce even more
+        # If also off track, reduce more
         if abs_lateral_error > LAT_ERROR_THRESHOLD_MEDIUM:
-            error_reduction = min(0.3, abs_lateral_error / 5.0)  # Additional 30% from error
-            total_reduction = min(0.95, turn_speed_reduction + error_reduction)  # Up to 95% total
+            error_reduction = min(0.2, abs_lateral_error / 6.0)  # Reduced from 0.3
+            total_reduction = min(0.6, turn_speed_reduction + error_reduction)  # Reduced from 0.95 to 0.6
             v_des = TARGET_SPEED * (1.0 - total_reduction)
-            v_des = max(1.5, v_des)  # Can go very slow for critical recovery
+            v_des = max(4.0, v_des)  # Increased from 1.5 to 4.0 m/s minimum
         else:
-            # On track but sharp turn: reduce speed for better turning
+            # On track but sharp turn: moderate speed reduction
             v_des = TARGET_SPEED * (1.0 - turn_speed_reduction)
-            v_des = max(3.5, v_des)  # Lower minimum for turns
-    elif abs_lateral_error > MAX_LATERAL_ERROR_FOR_FULL_SPEED:
-        # Off track (no sharp turn): reduce speed
-        speed_reduction = min(0.8, abs_lateral_error / 4.0)  # Reduce by up to 80%
+            v_des = max(5.5, v_des)  # Increased from 3.5 to 5.5 m/s minimum
+    elif abs_lateral_error > 3.0:
+        # Far off track: reduce speed moderately
+        speed_reduction = min(0.4, abs_lateral_error / 8.0)  # Reduced from 0.8, less aggressive
         v_des = TARGET_SPEED * (1.0 - speed_reduction)
-        v_des = max(3.0, v_des)  # Don't go below 3 m/s
-    elif abs_lateral_error > 1.0 and error_rate > 0.1:
-        # Lateral error is increasing: reduce speed to prevent drift
-        speed_reduction = min(0.4, abs_lateral_error / 3.0)  # Up to 40% reduction
+        v_des = max(5.0, v_des)  # Increased from 3.0 to 5.0 m/s minimum
+    elif abs_lateral_error > 2.0:
+        # Moderately off track: small speed reduction
+        speed_reduction = min(0.2, abs_lateral_error / 10.0)  # Very small reduction
         v_des = TARGET_SPEED * (1.0 - speed_reduction)
-        v_des = max(5.0, v_des)  # Moderate reduction
+        v_des = max(6.0, v_des)  # Keep speed higher
     else:
+        # On track or small error: use full target speed
         v_des = TARGET_SPEED
     
     # Clip v_des to velocity limits

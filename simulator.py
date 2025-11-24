@@ -4,6 +4,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from time import time
+from datetime import datetime
+import os
 
 from racetrack import RaceTrack
 from racecar import RaceCar
@@ -28,6 +30,18 @@ class Simulator:
         self.lap_started = False
         self.track_limit_violations = 0
         self.currently_violating = False
+        
+        # Setup logging
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(log_dir, f"simulation_{timestamp}.log")
+        self.last_log_time = 0.0
+        self.log_interval = 0.5  # Log every 500ms
+        self.log_handle = open(self.log_file, 'w')
+        self.log_handle.write("time,x,y,delta,v,phi,delta_des,v_des,v_delta,a,track_violations,currently_violating\n")
+        print(f"Logging to: {self.log_file}")
 
     def check_track_limits(self):
         car_position = self.car.state[0:2]
@@ -72,6 +86,7 @@ class Simulator:
     def run(self):
         try:
             if self.lap_finished:
+                self.close_log()
                 exit()
 
             self.figure.canvas.flush_events()
@@ -87,6 +102,13 @@ class Simulator:
             self.car.update(cont)
             self.update_status()
             self.check_track_limits()
+            
+            # Log every 500ms
+            if self.lap_start_time is not None:
+                current_time = time() - self.lap_start_time
+                if current_time - self.last_log_time >= self.log_interval:
+                    self.log_state(current_time, desired, cont)
+                    self.last_log_time = current_time
 
             self.axis.arrow(
                 self.car.state[0], self.car.state[1], \
@@ -116,7 +138,15 @@ class Simulator:
             return True
 
         except KeyboardInterrupt:
+            self.close_log()
             exit()
+    
+    def close_log(self):
+        """Close log file and print summary."""
+        if hasattr(self, 'log_handle') and self.log_handle:
+            self.log_handle.close()
+            print(f"\nLog file closed: {self.log_file}")
+            print(f"Total violations: {self.track_limit_violations}")
 
     def update_status(self):
         progress = np.linalg.norm(self.car.state[0:2] - self.rt.centerline[0, 0:2], 2)
@@ -134,6 +164,19 @@ class Simulator:
 
         if not self.lap_finished and self.lap_start_time is not None:
             self.lap_time_elapsed = time() - self.lap_start_time
+    
+    def log_state(self, current_time, desired, control):
+        """Log car state, controller outputs, and track status to file."""
+        state = self.car.state
+        self.log_handle.write(
+            f"{current_time:.3f},"
+            f"{state[0]:.6f},{state[1]:.6f},"
+            f"{state[2]:.6f},{state[3]:.6f},{state[4]:.6f},"
+            f"{desired[0]:.6f},{desired[1]:.6f},"
+            f"{control[0]:.6f},{control[1]:.6f},"
+            f"{self.track_limit_violations},{int(self.currently_violating)}\n"
+        )
+        self.log_handle.flush()  # Ensure data is written immediately
 
     def start(self):
         # Run the simulation loop every 1 second.
