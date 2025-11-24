@@ -62,6 +62,10 @@ class Simulator:
         if is_violating and not self.currently_violating:
             self.track_limit_violations += 1
             self.currently_violating = True
+            # Log violation details
+            print(f"VIOLATION #{self.track_limit_violations} at t={self.lap_time_elapsed:.2f}s: "
+                  f"pos=({car_position[0]:.2f}, {car_position[1]:.2f}), "
+                  f"proj_right={proj_right:.2f}/{right_dist:.2f}, proj_left={proj_left:.2f}/{left_dist:.2f}")
         elif not is_violating:
             self.currently_violating = False
 
@@ -123,6 +127,10 @@ class Simulator:
         if progress <= 1.0 and self.lap_started and not self.lap_finished:
             self.lap_finished = True
             self.lap_time_elapsed = time() - self.lap_start_time
+            # Log final statistics
+            print(f"\n=== LAP COMPLETE ===")
+            print(f"Lap time: {self.lap_time_elapsed:.2f}s")
+            print(f"Total violations: {self.track_limit_violations}")
 
         if not self.lap_finished and self.lap_start_time is not None:
             self.lap_time_elapsed = time() - self.lap_start_time

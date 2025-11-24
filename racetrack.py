@@ -6,7 +6,7 @@ import matplotlib.axes as axes
 
 class RaceTrack:
 
-    def __init__(self, filepath : str):
+    def __init__(self, filepath : str, raceline_path : str = None):
         data = np.loadtxt(filepath, comments="#", delimiter=",")
         self.centerline = data[:, 0:2]
         self.centerline = np.vstack((self.centerline[-1], self.centerline, self.centerline[0]))
@@ -22,6 +22,17 @@ class RaceTrack:
 
         self.centerline = np.delete(self.centerline, 0, axis=0)
         self.centerline = np.delete(self.centerline, -1, axis=0)
+
+        # Load raceline if provided
+        if raceline_path is not None:
+            raceline_data = np.loadtxt(raceline_path, comments="#", delimiter=",")
+            self.raceline = raceline_data[:, 0:2]
+            # Process raceline same way as centerline (wrap around for continuity)
+            self.raceline = np.vstack((self.raceline[-1], self.raceline, self.raceline[0]))
+            self.raceline = np.delete(self.raceline, 0, axis=0)
+            self.raceline = np.delete(self.raceline, -1, axis=0)
+        else:
+            self.raceline = None
 
         # Compute track left and right boundaries
         self.right_boundary = self.centerline[:, :2] + centerline_norm[:, :2] * np.expand_dims(data[:, 2], axis=1)
