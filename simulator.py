@@ -120,7 +120,7 @@ class Simulator:
         if progress > 10.0 and not self.lap_started:
             self.lap_started = True
     
-        if progress <= 1.0 and self.lap_started and not self.lap_finished:
+        if progress <= 5.0 and self.lap_started and not self.lap_finished: # changed 1 to 5 so completed lap is properly detected
             self.lap_finished = True
             self.lap_time_elapsed = time() - self.lap_start_time
 
