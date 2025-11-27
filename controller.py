@@ -10,7 +10,7 @@ def lower_controller(state: ArrayLike, desired: ArrayLike, parameters: ArrayLike
     desired_steering, desired_velocity = desired
     
     # proportional control for steering rate
-    steering_gain = 4.0
+    steering_gain = 4.5
     steering_error = desired_steering - current_steering
     steering_velocity = steering_gain * steering_error
     
@@ -20,7 +20,7 @@ def lower_controller(state: ArrayLike, desired: ArrayLike, parameters: ArrayLike
     steering_velocity = np.clip(steering_velocity, min_steer_rate, max_steer_rate)
     
     # proportional control for acceleration
-    velocity_gain = 1.2
+    velocity_gain = 1.5
     velocity_error = desired_velocity - current_velocity
     acceleration = velocity_gain * velocity_error
     
@@ -48,7 +48,7 @@ def controller(state: ArrayLike, parameters: ArrayLike, racetrack: RaceTrack) ->
     # lookahead distance for path following
     lookahead_index = nearest_point_index
 
-    lookahead = 20.0
+    lookahead = 16.0
     accumulated_distance = 0.0
     
     # traverse track points until we've covered the lookahead distance
@@ -82,7 +82,7 @@ def controller(state: ArrayLike, parameters: ArrayLike, racetrack: RaceTrack) ->
     
     # look ahead at multiple points to anticipate upcoming bends
     # estimate track curvature ahead for speed adaptation
-    lookahead_samples = 6
+    lookahead_samples = 8
     max_upcoming_curvature = 0.0
     
     for i in range(lookahead_samples):
@@ -111,10 +111,10 @@ def controller(state: ArrayLike, parameters: ArrayLike, racetrack: RaceTrack) ->
     # velocity planning -> aggressive speed reduction for extreme bends
     # use non-linear relationship (curvature squared) so extreme bends cause much more slowdown
     max_velocity = 54.0
-    curvature_factor = 30.0
+    curvature_factor = 34.0
 
     # square the curvature to make extreme bends cause exponentially more speed reduction
-    curvature_penalty = curvature_factor * (max_upcoming_curvature ** 2.2)
+    curvature_penalty = curvature_factor * (max_upcoming_curvature ** 3.2)
     target_velocity = max_velocity / (1.0 + curvature_penalty)
     target_velocity = np.clip(target_velocity, 10.0, max_velocity)
     
