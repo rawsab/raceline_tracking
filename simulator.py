@@ -11,11 +11,16 @@ from controller import lower_controller, controller
 
 class Simulator:
 
-    def __init__(self, rt : RaceTrack):
+    def __init__(self, rt : RaceTrack, racelinePath: str):
+        # load raceline from the file
+        self.raceline = np.loadtxt(racelinePath, comments="#", delimiter=",")[:, :2]
+        
         matplotlib.rcParams["figure.dpi"] = 300
         matplotlib.rcParams["font.size"] = 8
 
         self.rt = rt
+        self.rt.raceline = self.raceline
+        
         self.figure, self.axis = plt.subplots(1, 1)
 
         self.axis.set_xlabel("X"); self.axis.set_ylabel("Y")
@@ -68,6 +73,9 @@ class Simulator:
     def run(self):
         try:
             if self.lap_finished:
+                print(f"Lap completed: True")
+                print(f"Lap time: {self.lap_time_elapsed:.2f} seconds")
+                print(f"Track violations: {self.track_limit_violations}")
                 exit()
 
             self.figure.canvas.flush_events()
